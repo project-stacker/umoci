@@ -191,6 +191,21 @@ func manifestParser(rdr io.Reader) (interface{}, error) {
 	return manifest.Manifest, nil
 }
 
+func artifactParser(rdr io.Reader) (interface{}, error) {
+	var artifactManifest ispec.Artifact
+
+	if rdr != nil {
+		if err := json.NewDecoder(rdr).Decode(&artifactManifest); err != nil {
+			return nil, err
+		}
+	}
+	if artifactManifest.MediaType != "" && artifactManifest.MediaType != ispec.MediaTypeArtifactManifest {
+		return nil, errors.Errorf("invalid artifact manifest detected: artifact manifest contained incorrect mediaType: %s", artifactManifest.MediaType)
+	}
+
+	return artifactManifest, nil
+}
+
 // Register the core image-spec types.
 func init() {
 	RegisterParser(ispec.MediaTypeDescriptor, CustomJSONParser(ispec.Descriptor{}))
@@ -199,4 +214,5 @@ func init() {
 
 	RegisterTarget(ispec.MediaTypeImageManifest)
 	RegisterParser(ispec.MediaTypeImageManifest, manifestParser)
+	RegisterParser(ispec.MediaTypeArtifactManifest, artifactParser)
 }
