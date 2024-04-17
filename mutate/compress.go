@@ -50,14 +50,14 @@ func (nc noopCompressor) BytesRead() int64 {
 }
 
 // NoopCompressor provides no compression.
-var NoopCompressor Compressor = noopCompressor{}
+var NoopCompressor Compressor = &noopCompressor{}
 
 func (nc noopCompressor) WithOpt(CompressorOpt) Compressor {
 	return nc
 }
 
 // GzipCompressor provides gzip compression.
-var GzipCompressor Compressor = gzipCompressor{blockSize: 256 << 10}
+var GzipCompressor Compressor = &gzipCompressor{blockSize: 256 << 10}
 
 type GzipBlockSize int
 
@@ -108,7 +108,7 @@ func (gz gzipCompressor) WithOpt(opt CompressorOpt) Compressor {
 		gz.blockSize = int(val)
 	}
 
-	return gz
+	return &gz
 }
 
 func (gz gzipCompressor) BytesRead() int64 {
@@ -159,7 +159,7 @@ func (zs zstdCompressor) MediaTypeSuffix() string {
 }
 
 func (zs zstdCompressor) WithOpt(CompressorOpt) Compressor {
-	return zs
+	return &zs
 }
 
 func (zs zstdCompressor) BytesRead() int64 {
