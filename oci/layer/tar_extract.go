@@ -362,6 +362,21 @@ func (te *TarExtractor) ociWhiteout(root string, dir string, file string) error 
 	return errors.Wrap(err, "whiteout remove")
 }
 
+func isEmptyDir(name string) (bool, error) {
+	f, err := os.Open(name)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+
+	_, err = f.Readdirnames(1)
+	if err == io.EOF {
+		return true, nil
+	}
+
+	return false, err
+}
+
 func (te *TarExtractor) overlayFSWhiteout(dir string, file string) error {
 	isOpaque := file == whOpaque
 
@@ -372,12 +387,44 @@ func (te *TarExtractor) overlayFSWhiteout(dir string, file string) error {
 	}
 
 	// otherwise, white out the file itself.
+
 	p := filepath.Join(dir, strings.TrimPrefix(file, whPrefix))
-	if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
-		return errors.Wrapf(err, "couldn't create overlayfs whiteout for %s", p)
+	if _, err := te.fsEval.Lstat(dir); err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return errors.Wrapf(err, "couldn't stat dir %s", dir)
+		}
+
+		if err := te.fsEval.MkdirAll(dir, 0777); err != nil {
+			return errors.Wrapf(err, "couldn't create missing dir for %s", dir)
+		}
+
+		err = te.fsEval.Mknod(p, unix.S_IFCHR|0666, unix.Mkdev(0, 0))
+		return errors.Wrapf(err, "couldn't create overlayfs whiteout char dev %s", p)
 	}
 
-	err := te.fsEval.Mknod(p, unix.S_IFCHR|0666, unix.Mkdev(0, 0))
+	var err error
+	ok, err := isEmptyDir(p)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			if err := te.fsEval.MkdirAll(dir, 0777); err != nil {
+				return errors.Wrapf(err, "couldn't create missing dir for %s", dir)
+			}
+			err = te.fsEval.Mknod(p, unix.S_IFCHR|0666, unix.Mkdev(0, 0))
+		}
+		return errors.Wrapf(err, "couldn't determine if path was empty %s", p)
+	} else {
+		if ok {
+			// dir is empty, then remove and create the overlay char dev
+			if err := os.RemoveAll(p); err != nil && !os.IsNotExist(err) {
+				return errors.Wrapf(err, "couldn't create overlayfs whiteout for %s", p)
+			}
+
+			err = te.fsEval.Mknod(p, unix.S_IFCHR|0666, unix.Mkdev(0, 0))
+		} else {
+			// subdirs already exist, then no need to remove, just add the opaque attr
+			err = te.fsEval.Lsetxattr(p, "user.overlay.opaque", []byte("y"), 0)
+		}
+	}
 	return errors.Wrapf(err, "couldn't create overlayfs whiteout for %s", p)
 }
 
@@ -510,6 +557,9 @@ func (te *TarExtractor) UnpackEntry(root string, hdr *tar.Header, r io.Reader) (
 	// FIXME: We have to make this consistent, since if the tar archive doesn't
 	//        have entries for some of these components we won't be able to
 	//        verify that we have consistent results during unpacking.
+	if err := patchOverlayWhiteout(dir, te.fsEval); err != nil {
+		return errors.Wrap(err, "unable to patch overlay whiteout")
+	}
 	if err := te.fsEval.MkdirAll(dir, 0777); err != nil {
 		return errors.Wrap(err, "mkdir parent")
 	}
@@ -705,5 +755,50 @@ out:
 	for pth := upperPath; pth != filepath.Dir(pth); pth = filepath.Dir(pth) {
 		te.upperPaths[pth] = struct{}{}
 	}
+	return nil
+}
+
+// patchOverlayWhiteout converts a whiteout char dev into a userxattr to handle
+// the case where there is a whiteout char dev and a subdir is being created
+// with that whiteout filename in the directory path which fails
+func patchOverlayWhiteout(dir string, fsEval fseval.FsEval) error {
+	for p := dir; p != "/"; p = filepath.Dir(p) {
+		pinfo, err := os.Lstat(p)
+		if err != nil {
+			if os.IsNotExist(errors.Cause(err)) {
+				return nil
+			}
+
+			log.Errorf("failed to stat %s", p)
+			return err
+		}
+		isCharDev, err := isOverlayWhiteoutCharDev(pinfo, p, fsEval)
+		if err != nil {
+			return err
+		}
+
+		if !isCharDev {
+			continue
+		}
+
+		log.Infof("patching overlay whiteout %s from char dev to userxattr\n", p)
+		// remove the char device
+		if err := os.Remove(p); err != nil {
+			return err
+		}
+		// replace it with a dir
+		err = fsEval.MkdirAll(p, 0777)
+		if err != nil {
+			return err
+		}
+		// and set userxattr
+		err = fsEval.Lsetxattr(p, "user.overlay.opaque", []byte("y"), 0)
+		if err != nil {
+			return err
+		}
+
+		break
+	}
+
 	return nil
 }

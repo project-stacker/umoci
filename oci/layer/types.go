@@ -51,4 +51,7 @@ type RepackOptions struct {
 	// .wh.foo style whiteouts when generating tarballs. Without this,
 	// whiteouts are untouched.
 	TranslateOverlayWhiteouts bool
+
+	// OverlayLowerDirs is a list of unpacked overlay lower dir paths
+	OverlayLowerDirs []string
 }

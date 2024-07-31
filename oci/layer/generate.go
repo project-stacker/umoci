@@ -23,8 +23,10 @@ import (
 	"path"
 	"path/filepath"
 	"sort"
+	"syscall"
 
 	"github.com/apex/log"
+	"github.com/opencontainers/umoci/pkg/fseval"
 	"github.com/opencontainers/umoci/pkg/unpriv"
 	"github.com/pkg/errors"
 	"github.com/vbatts/go-mtree"
@@ -122,6 +124,59 @@ func GenerateLayer(path string, deltas []mtree.InodeDelta, opt *RepackOptions) (
 	return reader, nil
 }
 
+// exists but not a dir, so what is it?
+func isWhiteoutCharDevInPath(ldir string, dir string, fsEval fseval.FsEval) (bool, error) {
+	for d := dir; d != "/"; d = filepath.Dir(d) {
+		dpath := path.Join(ldir, d)
+		dinfo, err := os.Lstat(dpath)
+		if err != nil {
+			// we expect only not-exists and not-a-dir errors here
+			if os.IsNotExist(err) || errors.Is(err, syscall.ENOTDIR) {
+				continue
+			}
+
+			return false, err
+		}
+
+		ok, err := isOverlayWhiteoutCharDev(dinfo, dpath, fsEval)
+		if err != nil {
+			return false, err
+		}
+
+		if !ok {
+			continue
+		}
+
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func isPresentInLowerDirs(dir string, lowerDirs []string, fsEval fseval.FsEval) (bool, error) {
+	for _, ldir := range lowerDirs {
+		p := path.Join(ldir, "overlay", dir)
+		_, err := os.Lstat(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+
+			if errors.Is(err, syscall.ENOTDIR) {
+				// some part of the path is not a dir, and it could be a
+				// whiteout char dev
+				return isWhiteoutCharDevInPath(path.Join(ldir, "overlay"), dir, fsEval)
+			}
+
+			return false, err
+		}
+
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // GenerateInsertLayer generates a completely new layer from "root"to be
 // inserted into the image at "target". If "root" is an empty string then the
 // "target" will be removed via a whiteout.
@@ -170,9 +225,34 @@ func GenerateInsertLayer(root string, target string, opaque bool, opt *RepackOpt
 			if err != nil {
 				return err
 			}
+
+			present, err := isPresentInLowerDirs(pathInTar, packOptions.OverlayLowerDirs, tg.fsEval)
+			if err != nil {
+				return err
+			}
+
 			if packOptions.TranslateOverlayWhiteouts && whiteout {
-				log.Debugf("converting overlayfs whiteout %s to OCI whiteout", pathInTar)
-				return tg.AddWhiteout(pathInTar)
+				if present {
+					log.Debugf("converting overlayfs whiteout %s to OCI whiteout", pathInTar)
+					ret := tg.AddWhiteout(pathInTar)
+					if info.IsDir() {
+						empty, err := isEmptyDir(curPath)
+						if err != nil {
+							return err
+						}
+						if !empty {
+							log.Debugf("adding %s since dir is not empty", pathInTar)
+							if err := tg.AddFile(pathInTar, curPath); err != nil {
+								return err
+							}
+						}
+					}
+					return ret
+				} else {
+					// skip this since previous layers dont have this file/dir
+					log.Debugf("skipping whiteout since %s not present in any previous layers", pathInTar)
+					return nil
+				}
 			}
 
 			return tg.AddFile(pathInTar, curPath)

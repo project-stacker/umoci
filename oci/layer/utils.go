@@ -229,9 +229,9 @@ func InnerErrno(err error) error {
 	return errno
 }
 
-// isOverlayWhiteout returns true if the FileInfo represents an overlayfs style
+// isOverlayWhiteoutCharDev returns true if the FileInfo represents an overlayfs style
 // whiteout (i.e. mknod c 0 0) and false otherwise.
-func isOverlayWhiteout(info os.FileInfo, fullPath string, fsEval fseval.FsEval) (bool, error) {
+func isOverlayWhiteoutCharDev(info os.FileInfo, fullPath string, fsEval fseval.FsEval) (bool, error) {
 	var major, minor uint32
 	switch stat := info.Sys().(type) {
 	case *unix.Stat_t:
@@ -244,8 +244,19 @@ func isOverlayWhiteout(info os.FileInfo, fullPath string, fsEval fseval.FsEval) 
 		return false, errors.Errorf("[internal error] unknown stat info type %T", info.Sys())
 	}
 
-	if major == 0 && minor == 0 &&
-		info.Mode()&os.ModeCharDevice != 0 {
+	return major == 0 && minor == 0 &&
+		info.Mode()&os.ModeCharDevice != 0, nil
+}
+
+// isOverlayWhiteout returns true if the FileInfo represents an overlayfs style
+// whiteout (i.e. mknod c 0 0) or a userxattr value, and false otherwise.
+func isOverlayWhiteout(info os.FileInfo, fullPath string, fsEval fseval.FsEval) (bool, error) {
+	isCharDev, err := isOverlayWhiteoutCharDev(info, fullPath, fsEval)
+	if err != nil {
+		return false, err
+	}
+
+	if isCharDev {
 		return true, nil
 	}
 
