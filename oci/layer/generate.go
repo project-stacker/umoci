@@ -249,9 +249,9 @@ func GenerateInsertLayer(root string, target string, opaque bool, opt *RepackOpt
 					}
 					return ret
 				} else {
-					// skip this since previous layers dont have this file/dir
-					log.Debugf("skipping whiteout since %s not present in any previous layers", pathInTar)
-					return nil
+					// overlayfs adds opaque xattr for newly created dirs,
+					// so we still add this dir into the generated tar
+					return tg.AddFile(pathInTar, curPath)
 				}
 			}
 
